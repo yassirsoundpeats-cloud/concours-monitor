@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import smtplib
@@ -5,17 +6,27 @@ import requests
 from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
-BASE_URL = "https://www.emploi-public.ma"
-LIST_URL = f"{BASE_URL}/fr/concours-liste"
-
+BASE_URL = "https://ma.indeed.com"
 STATE_FILE = "seen.json"
-MAX_PAGES = 10
 
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 TO_EMAIL = "yassirsoundpeats@gmail.com"
+
+SEARCHES = [
+    "Graphic Designer",
+    "Motion Designer",
+    "Art Director",
+    "Creative Director",
+    "Graphic Motion Designer",
+    "Infographiste",
+    "Creative Designer",
+    "3D Designer",
+]
+
+MAX_PAGES = 5
 
 
 def load_seen():
@@ -43,47 +54,81 @@ def save_seen(seen):
 def get_offers():
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 Concours Monitor"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/140.0 Safari/537.36"
+        )
     })
 
-    offers = []
+    offers = {}
 
-    for page in range(1, MAX_PAGES + 1):
-        url = LIST_URL if page == 1 else f"{LIST_URL}?page={page}"
+    for search in SEARCHES:
+        for page in range(MAX_PAGES):
+            start = page * 10
 
-        response = session.get(url, timeout=30)
-        response.raise_for_status()
+            url = (
+                f"{BASE_URL}/jobs?"
+                f"q={quote(search)}"
+                f"&l=Morocco"
+                f"&start={start}"
+            )
 
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        found_on_page = 0
-
-        for link in soup.find_all("a", href=True):
-            href = link.get("href", "").strip()
-            title = link.get_text(" ", strip=True)
-
-            if not title or len(title) < 10:
+            try:
+                response = session.get(url, timeout=30)
+                response.raise_for_status()
+            except Exception as e:
+                print(f"⚠️ Erreur Indeed ({search}, page {page + 1}): {e}")
                 continue
 
-            if "concours" not in href.lower() and "avis" not in href.lower():
-                continue
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            full_url = urljoin(BASE_URL, href)
+            cards = soup.select("div.job_seen_beacon")
 
-            if full_url in [x["url"] for x in offers]:
-                continue
+            if not cards:
+                cards = soup.select("div.cardOutline")
 
-            offers.append({
-                "title": title,
-                "url": full_url
-            })
+            found = 0
 
-            found_on_page += 1
+            for card in cards:
+                link = card.select_one("a[href*='/viewjob']")
+                title_el = card.select_one(
+                    "h2.jobTitle a, h2.jobTitle span"
+                )
 
-        if found_on_page == 0:
-            break
+                if not link:
+                    continue
 
-    return offers
+                title = (
+                    title_el.get_text(" ", strip=True)
+                    if title_el
+                    else link.get_text(" ", strip=True)
+                )
+
+                href = link.get("href", "").strip()
+
+                if not title or not href:
+                    continue
+
+                full_url = urljoin(BASE_URL, href)
+
+                offers[full_url] = {
+                    "title": title,
+                    "url": full_url,
+                    "search": search,
+                }
+
+                found += 1
+
+            print(
+                f"🔎 {search} | page {page + 1} | "
+                f"{found} offres"
+            )
+
+            if found == 0:
+                break
+
+    return list(offers.values())
 
 
 def send_email(new_offers):
@@ -93,33 +138,33 @@ def send_email(new_offers):
     msg = MIMEMultipart("alternative")
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = TO_EMAIL
-    msg["Subject"] = f"🔔 Nouveau(x) concours au Maroc : {len(new_offers)}"
+    msg["Subject"] = (
+        f"🎨 {len(new_offers)} nouvelle(s) offre(s) Designer"
+    )
 
     html = """
     <html>
     <body>
-    <h2>🔔 Nouveaux concours / recrutements</h2>
-    <p>De nouvelles offres ont été détectées sur emploi-public.ma :</p>
-    <ul>
+        <h2>🎨 Nouvelles offres Designer</h2>
+        <p>
+            De nouvelles offres ont été détectées sur Indeed Maroc :
+        </p>
+        <ul>
     """
 
     for offer in new_offers:
         html += f"""
         <li>
             <strong>{offer['title']}</strong><br>
-            <a href="{offer['url']}">Voir l'offre</a>
+            Recherche : {offer['search']}<br>
+            <a href="{offer['url']}">Voir l'offre sur Indeed</a>
         </li>
         <br>
         """
 
     html += """
-    </ul>
-    <p>
-        Source officielle :
-        <a href="https://www.emploi-public.ma/">
-        emploi-public.ma
-        </a>
-    </p>
+        </ul>
+        <p>Source : Indeed Maroc</p>
     </body>
     </html>
     """
@@ -128,38 +173,48 @@ def send_email(new_offers):
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, TO_EMAIL, msg.as_string())
+        server.sendmail(
+            GMAIL_ADDRESS,
+            TO_EMAIL,
+            msg.as_string()
+        )
+
+    print("📧 Email envoyé avec succès.")
 
 
 def main():
-    print("🔎 Recherche des nouveaux concours...")
+    print("🔎 Recherche des offres Designer sur Indeed Maroc...")
 
     seen = load_seen()
     offers = get_offers()
 
-    print(f"📋 Offres trouvées : {len(offers)}")
+    print(f"📋 Total offres trouvées : {len(offers)}")
 
     current_ids = {offer["url"] for offer in offers}
 
-    # Première تشغيل: créer une baseline sans envoyer des centaines d'emails
     if not seen:
         save_seen(current_ids)
-        print("✅ Première تشغيل terminée. Baseline créée.")
+        print(
+            "✅ Première تشغيل: baseline créée. "
+            "Aucun email envoyé pour les anciennes offres."
+        )
         return
 
     new_offers = [
-        offer for offer in offers
+        offer
+        for offer in offers
         if offer["url"] not in seen
     ]
 
     if new_offers:
-        print(f"🆕 Nouveaux concours : {len(new_offers)}")
+        print(f"🆕 Nouvelles offres : {len(new_offers)}")
         send_email(new_offers)
     else:
-        print("ℹ️ Aucun nouveau concours.")
+        print("ℹ️ Aucune nouvelle offre.")
 
     save_seen(seen | current_ids)
 
 
 if __name__ == "__main__":
     main()
+```
